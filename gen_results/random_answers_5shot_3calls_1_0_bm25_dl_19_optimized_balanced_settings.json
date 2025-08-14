@@ -1,0 +1,18 @@
+{
+    "k": 5,
+    "num_calls": 3,
+    "step": 1,
+    "tops": 1,
+    "tails": 0,
+    "temperature": 0.0,
+    "query_set": "19",
+    "retriever": "bm25",
+    "long_answer": true,
+    "optimization_strategy": "balanced",
+    "full_permutation": false,
+    "max_candidates": 20,
+    "alpha": null,
+    "beta": null,
+    "gamma": null,
+    "experiment_start_at": "2025-08-02 23:17:35.684888"
+}
