@@ -53,9 +53,9 @@ class SentenceLevelRAGSystem:
     def prepare_sentence_level_data(self, dataset_name: str, retriever_name: str = 'bm25'):
         """Prepare sentence-level data"""
         try:
-            from tools.enhanced_prompt_tools import EnhancedPromptTools
-            enhanced_tools = EnhancedPromptTools()
-            doc_dict, queries, res = enhanced_tools.prepare_data(dataset_name, retriever_name)
+            from tools.new_prompt_tools import PromptTools
+            tools = PromptTools()
+            doc_dict, queries, res = tools.prepare_data(dataset_name, retriever_name)
             return doc_dict, queries, res
         except Exception as e:
             logger.error(f"Data preparation error: {e}")
@@ -218,43 +218,58 @@ class SentenceLevelRAGSystem:
                 if qid in existed_qids:
                     logger.info(f"Skipping already processed query ID {idx+1}/{len(queries)}: {qid}")
                     continue
-                
+            
                 logger.info(f"Processing query ID {idx+1}/{len(queries)}: {qid} - {query[:50]}...")
-                
+            
                 strategy_names, contexts = self.compose_sentence_level_context(
                     query=query, res=res, qid=qid, k=k, doc_dict=doc_dict,
                     top_docs=top_docs, optimization_strategy=optimization_strategy,
                     alpha=alpha, beta=beta
                 )
-                
+            
                 varying_context_result = {}
-                
+            
                 for strategy_name, context in zip(strategy_names, contexts):
                     try:
                         llm.set_seed(1000)
                         logger.info(f"\tStrategy: {strategy_name}, Context length: {len(context)} chars")
-                        
+            
                         prompt = prompt_assembler(context, query, long_answer)
-                        
-                        multi_call_results = {}
+            
+                        qid_result = {
+                            "problem": query,
+                            "context": context if context else "No context found",
+                            "responses": {}
+                        }
+            
                         for j in range(num_calls):
                             logger.info(f"\t\tCall {j+1}/{num_calls}")
-                            result = llama_tools.single_call(
-                                llm=llm, prompt=prompt, temperature=temperature, long_answer=long_answer
-                            )
-                            multi_call_results[str(j)] = result
-                        
-                        varying_context_result[strategy_name] = multi_call_results
+                            try:
+                                result = llama_tools.single_call(
+                                    llm=llm, prompt=prompt, temperature=temperature, long_answer=long_answer
+                                )
+                                qid_result["responses"][str(j)] = result
+                            except Exception as e:
+                                logger.error(f"Error in call {j}: {e}")
+                                qid_result["responses"][str(j)] = f"Error: {str(e)}"
+            
+                            result_to_write[qid] = qid_result
+                            try:
+                                experiment_tools.update_json_result_file(file_name=file_name, result_to_write=result_to_write)
+                            except Exception as save_error:
+                                logger.error(f"Error saving after response {j}: {save_error}")
+            
+                        result_to_write[qid] = qid_result
+            
                     except Exception as e:
                         logger.error(f"Error processing strategy {strategy_name} for Query ID {qid}: {e}")
-                
-                result_to_write[qid] = varying_context_result
-                
+            
                 try:
                     experiment_tools.update_json_result_file(file_name=file_name, result_to_write=result_to_write)
                     logger.info(f"Saved results for Query ID {qid} to {file_name}")
                 except Exception as e:
                     logger.error(f"Failed to save results for Query ID {qid}: {e}")
+
             
             logger.info(f"Experiment completed. Results saved to: {file_name}")
             return file_name
@@ -280,7 +295,7 @@ class SentenceLevelEvaluator:
             raise
     
     def evaluate_sentence_level_results(self, gen_file_path: str, dataset_name: str):
-        """Evaluate sentence-level generation results"""
+        """Evaluate sentence-level generation results (adapted for new JSON structure with problem/context/responses)."""
         try:
             if dataset_name == 'nq_test':
                 gold_answers = pd.read_csv('./golden_answers/gdas_nq_test.csv')
@@ -288,27 +303,58 @@ class SentenceLevelEvaluator:
             else:
                 qids, qrels, doc_dict = self._prepare_qrels_data(dataset_name)
                 eval_method = 'bertscore'
-            
-            with open(gen_file_path, 'r') as f:
-                answer_book = json.load(f)
-            
+    
+            try:
+                with open(gen_file_path, "r") as f:
+                    answer_book = json.load(f)
+            except Exception as e:
+                logger.error(f"Failed to read generated answers file: {e}")
+                return
+    
             eval_file_path = gen_file_path.replace('gen_results', 'eval_results').replace('.json', '_eval.json')
             os.makedirs(os.path.dirname(eval_file_path), exist_ok=True)
-            
-            eval_results = {}
-            total_qids = len(answer_book)
-            
-            for idx, qid in enumerate(answer_book.keys()):
-                logger.info(f"Evaluating query ID {idx+1}/{total_qids}: {qid}")
+    
+            try:
+                with open(eval_file_path, "r") as f:
+                    existed_results = json.load(f)
+                    existed_qids = len(existed_results)
+            except:
+                existed_results = {}
+                existed_qids = 0
+    
+            logger.info(f"Already evaluated queries: {existed_qids}")
+            logger.info("Starting evaluation...")
+    
+            if dataset_name == 'nq_test':
+                all_qids = [str(q) for q in gold_answers.qid.tolist()]
+            else:
+                all_qids = [str(q) for q in qids]
+    
+            total_qids = len(all_qids)
+    
+            for idx, qid in enumerate(all_qids[existed_qids:]):
+                logger.info(f"Evaluating query {existed_qids + idx + 1}/{total_qids}: {qid}")
+    
+                if qid not in answer_book:
+                    logger.warning(f"Query {qid} not found in generated answers file")
+                    continue
+    
+                qid_data = answer_book[qid]
+                if "responses" not in qid_data:
+                    logger.warning(f"No responses found for query {qid}")
+                    continue
+    
                 eval_result_qid = {}
-                
-                for strategy_name in answer_book[qid].keys():
+    
+                for strategy_name, strategy_responses in qid_data["responses"].items():
                     logger.info(f"\tStrategy: {strategy_name}")
                     eval_result_strategy = {}
-                    
-                    for call_idx, call_result in answer_book[qid][strategy_name].items():
-                        to_eval = call_result['answer']
-                        
+    
+                    for call_idx, to_eval in strategy_responses.items():
+                        if isinstance(to_eval, str) and to_eval.startswith("Error:"):
+                            logger.warning(f"\t\tSkipping error response for call {call_idx}")
+                            continue
+    
                         if eval_method == 'em_f1':
                             try:
                                 from tools.eval_tools import cal_em, cal_f1
@@ -330,25 +376,27 @@ class SentenceLevelEvaluator:
                                     'qrel_2': {'precision': {'avg': -1}, 'recall': {'avg': -1}, 'f1': {'avg': -1}},
                                     'qrel_3': {'precision': {'avg': -1}, 'recall': {'avg': -1}, 'f1': {'avg': -1}}
                                 }
-                        
+    
                         eval_result_strategy[call_idx] = r
-                    
+    
                     eval_result_qid[strategy_name] = eval_result_strategy
-                
-                eval_results[qid] = eval_result_qid
-                
+    
+                existed_results[qid] = eval_result_qid
+    
                 try:
-                    with open(eval_file_path, 'w') as f:
-                        json.dump(eval_results, f, indent=4)
+                    with open(eval_file_path, "w") as f:
+                        json.dump(existed_results, f, indent=4)
                     logger.info(f"Saved evaluation results for Query ID {qid} to {eval_file_path}")
                 except Exception as e:
                     logger.error(f"Failed to save evaluation results for Query ID {qid}: {e}")
-            
+    
             logger.info(f"Sentence-level evaluation completed. Results saved to: {eval_file_path}")
             return eval_file_path
+    
         except Exception as e:
             logger.error(f"Evaluation failed: {e}")
             raise
+
     
     def _prepare_qrels_data(self, dataset_name: str):
         """Prepare qrels data"""
