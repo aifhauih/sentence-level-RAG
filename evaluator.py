@@ -7,7 +7,7 @@ import os
 from tools import eval_tools
 
 import os
-os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
+# os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
 
 # Set transformers cache directory (must be set before importing transformers)
 def set_model_cache_dir(cache_dir):
@@ -84,7 +84,7 @@ def get_docnos(qid, doc_dict, qrels):
             missing_docnos.append(str(docno))
     
     # Save missing docnos to file
-    if missing_docnos:
+    # if missing_docnos:
         # with open(f'./missing_docnos_qid_{qid}.txt', 'w') as f:
         #     f.write('\n'.join(missing_docnos))
         # print(f"Missing docnos saved to ./missing_docnos_qid_{qid}.txt")
@@ -105,6 +105,7 @@ def evaluator(to_eval: str, docno_dict: dict, qrel_level: int, local_model_path:
         return r
 
     pred_text = to_eval
+    print(f"====> pred_text: {pred_text}")
     predictions = [pred_text] * len(doc_texts)
     references = doc_texts
     
@@ -190,14 +191,15 @@ if __name__=="__main__":
     # Experiment begins
     print("==== Begin Evaluation ====")
     # Prepare data
-    if(eval_method == 'bertscore'):
+    if eval_method == 'bertscore':
         print(f"Using model: {local_model_path}")
         answer_scorer = load("bertscore", model_type=local_model_path)
         qids, qrels, doc_dict = prepare_qids_qrels_docdict(dataset_name)
-    elif(eval_method == 'em/f1'):
+    elif eval_method == 'em/f1':
         qids, gold_answers = prepare_qids_goldanswers(dataset_name)
     else:
         print(f'This evaluation method is not currently supported')
+        exit()
     
     # Read the generated answers
     try:
@@ -215,34 +217,63 @@ if __name__=="__main__":
     except:
         existed_results = {}
         existed_qids = 0
-    print("Answer data loaded")
     
-    for qid in [str(id) for id in qids[existed_qids:]]:
-        print(f'Evaluating Qid={qid}')
+    print("Answer data loaded")
+    print(f"Already evaluated queries: {existed_qids}")
+    
+    total_qids = len(qids)
+    
+    # Evaluation loop
+    for qid_idx, qid in enumerate([str(id) for id in qids[existed_qids:]]):
+        print(f'Evaluating query {existed_qids + qid_idx + 1}/{total_qids}: {qid}')
+    
+        if qid not in answer_book:
+            print(f"  Warning: Query {qid} not found in answer file")
+            continue
+    
+        qid_data = answer_book[qid]
+        if 'responses' not in qid_data:
+            print(f"  Warning: No responses found for query {qid}")
+            continue
+    
         eval_result_qid = {}
-        for start in answer_book[str(qid)].keys():
-            print(f'Start={start}, batch={k}')
-            eval_result_start = {}
-            for i in answer_book[str(qid)][str(start)].keys():
-                print(f'\nCall {i}')
-                to_eval = answer_book[str(qid)][str(start)][str(i)]['answer']
-                
-                if(dataset_name == 'dev_small'):
+    
+        for strategy_name in qid_data['responses'].keys():
+            print(f'  Strategy: {strategy_name}')
+            eval_result_strategy = {}
+    
+            for call_idx, to_eval in qid_data['responses'][strategy_name].items():
+                if isinstance(to_eval, str) and to_eval.startswith('Error:'):
+                    print(f"    Skipping error response for call {call_idx}")
+                    continue
+    
+                if isinstance(to_eval, dict) and 'answer' in to_eval:
+                    to_eval = to_eval['answer']
+    
+                if not isinstance(to_eval, str) or not to_eval.strip():
+                    print(f"    Skipping invalid or empty answer for call {call_idx}")
+                    continue
+    
+                if eval_method == 'bertscore':
                     docno_dict = get_docnos(qid=qid, doc_dict=doc_dict, qrels=qrels)
-                    r = eval_by_qrels(to_eval=to_eval, docno_dict=docno_dict, qrel_levels=[1], local_model_path=local_model_path)
-                elif(dataset_name in ['19', '20', '21', '22']):
-                    docno_dict = get_docnos(qid=qid, doc_dict=doc_dict, qrels=qrels)
-                    r = eval_by_qrels(to_eval=to_eval, docno_dict=docno_dict, local_model_path=local_model_path)
-                elif(dataset_name == 'nq_test'):
-                    gold_answers_qid = gold_answers[gold_answers.qid==int(qid)].gold_answer.values
-                    r = eval_by_goldanswers(to_eval=to_eval, refs=gold_answers_qid)
+                    if dataset_name == 'dev_small':
+                        r = eval_by_qrels(to_eval=to_eval, docno_dict=docno_dict,
+                                          qrel_levels=[1], local_model_path=local_model_path)
+                    else:
+                        print(f"[DEBUG] qid={qid}, strategy={strategy_name}, call={call_idx}, "
+                              f"type={type(to_eval)}, value={to_eval[:80]}...")
+                        r = eval_by_qrels(to_eval=to_eval, docno_dict=docno_dict,
+                                          local_model_path=local_model_path)
                 else:
-                    print('This dataset doesn\'t have reference answers')
-                eval_result_start.update({i: r})
-            eval_result_qid.update({start: eval_result_start})
-        
-        with open(file=eval_file_path, mode="r") as f:
-            existed_results.update({qid: eval_result_qid})
-
-        with open(file=eval_file_path, mode="w+") as f:
+                    gold_answers_qid = gold_answers[gold_answers.qid == int(qid)].gold_answer.values
+                    r = eval_by_goldanswers(to_eval=to_eval, refs=gold_answers_qid)
+    
+                eval_result_strategy.update({call_idx: r})
+    
+            eval_result_qid.update({strategy_name: eval_result_strategy})
+    
+        existed_results.update({qid: eval_result_qid})
+        with open(eval_file_path, "w+") as f:
             json.dump(existed_results, f, indent=4)
+    
+    print(f"=== File evaluation completed: {eval_file_path} ===")
