@@ -1,0 +1,13 @@
+{
+    "k": 5,
+    "full_permutation": false,
+    "num_calls": 1,
+    "step": 1,
+    "tops": 1,
+    "tails": 0,
+    "temperature": 0.0,
+    "query_set": "19",
+    "retriever": "bm25",
+    "long_answer?": true,
+    "--experiment_start_at": "2025-08-15 16:52:59.435634"
+}
