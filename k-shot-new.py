@@ -69,8 +69,8 @@ if __name__ == "__main__":
     llm = llama_tools.load_llama()
     
     # Initialize enhanced prompt tools
-    enhanced_prompt_tools = EnhancedPromptTools()
-    doc_dict, queries, res = enhanced_prompt_tools.prepare_data(dataset_name, retriever_name)
+    prompt_tools = PromptTools()
+    doc_dict, queries, res = prompt_tools.prepare_data(dataset_name, retriever_name)
     
     # Set filename
     if optimization_strategy == 'none':
@@ -139,7 +139,7 @@ if __name__ == "__main__":
         else:
             # Use optimized context selection
             if full_permutation:
-                start_records, context_book = enhanced_prompt_tools.compose_context_with_optimization_and_permutations(
+                start_records, context_book = prompt_tools.compose_context_with_optimization_and_permutations(
                     query=query, res=res, qid=qid, k=k, doc_dict=doc_dict,
                     optimization_strategy=optimization_strategy, 
                     full_permutations=full_permutation,
@@ -147,7 +147,7 @@ if __name__ == "__main__":
                     alpha=alpha, beta=beta
                 )
             else:
-                start_records, context_book = enhanced_prompt_tools.compose_optimized_context(
+                start_records, context_book = prompt_tools.compose_optimized_context(
                     query=query, res=res, qid=qid, k=k, doc_dict=doc_dict,
                     optimization_strategy=optimization_strategy,
                     max_candidates=max_candidates,
@@ -157,27 +157,65 @@ if __name__ == "__main__":
         print('Starting records: ', start_records)
         
         # Generate for each context variant
+        qid_complete_result = {
+            "problem": query,
+            "contexts": {},
+            "responses": {}
+        }
+        
         for start, context in zip(start_records, context_book):
             llm.set_seed(1000)
             print(f'\tStarting rank.{start}')
             
+            # Store context for this start rank
+            qid_complete_result["contexts"][start] = context
+            
             # Assemble prompt
-            from tools.enhanced_prompt_tools import prompt_assembler
+            from tools.prompt_tools import prompt_assembler
             prompt = prompt_assembler(context, query, long_answer)
             print(f"Prompt length: {len(prompt)} characters")
-            print(f"Context preview: {context[:200]}...")
+            print(f"Context preview: {context}")
             
             multi_call_results = {}
             for j in range(num_calls):
                 print(f'\t\tCall #{j}')
-                result = llama_tools.single_call(
-                    llm=llm, prompt=prompt, temperature=temperature, long_answer=long_answer
-                )
-                multi_call_results.update({j: result})
+                try:
+                    result = llama_tools.single_call(
+                        llm=llm, prompt=prompt, temperature=temperature, long_answer=long_answer
+                    )
+                    print(f"result: {result}")
+                    multi_call_results[j] = result
+                    
+                    # Save after each response
+                    if start not in qid_complete_result["responses"]:
+                        qid_complete_result["responses"][start] = {}
+                    qid_complete_result["responses"][start][j] = result
+                    
+                    result_to_write[qid] = qid_complete_result
+                    try:
+                        experiment_tools.update_json_result_file(file_name=file_name, result_to_write=result_to_write)
+                    except Exception as save_error:
+                        print(f"Error saving after response {j} for start {start}: {save_error}")
+                        
+                except Exception as e:
+                    print(f"Error in call {j} for start {start}: {e}")
+                    multi_call_results[j] = f"Error: {str(e)}"
+                    
+                    # Save error result too
+                    if start not in qid_complete_result["responses"]:
+                        qid_complete_result["responses"][start] = {}
+                    qid_complete_result["responses"][start][j] = f"Error: {str(e)}"
+                    
+                    result_to_write[qid] = qid_complete_result
+                    try:
+                        experiment_tools.update_json_result_file(file_name=file_name, result_to_write=result_to_write)
+                    except Exception as save_error:
+                        print(f"Error saving after error in response {j} for start {start}: {save_error}")
             
             varying_context_result.update({start: multi_call_results})
         
-        result_to_write.update({qid: varying_context_result})
+        # Final save for this qid (ensures consistency)
+        result_to_write[qid] = qid_complete_result
         experiment_tools.update_json_result_file(file_name=file_name, result_to_write=result_to_write)
 
     # Print the full generated JSON file
