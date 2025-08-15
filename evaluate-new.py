@@ -273,7 +273,7 @@ if __name__ == "__main__":
     # Determine evaluation method
     eval_method = 'em/f1' if dataset_name == 'nq_test' else 'bertscore'
     
-    print("==== Enhanced Evaluator ====")
+    print("==== New Evaluator ====")
     print(f"Dataset: {dataset_name}")
     print(f"Evaluation method: {eval_method}")
     
@@ -340,6 +340,7 @@ if __name__ == "__main__":
         try:
             with open(file_path, "r") as f:
                 answer_book = json.load(f)
+                # print("====>", answer_book)
         except Exception as e:
             print(f"Failed to read answer file: {e}")
             continue
@@ -368,13 +369,29 @@ if __name__ == "__main__":
             eval_result_qid = {}
             
             # Iterate through each context strategy
-            for strategy_name in answer_book[str(qid)].keys():
+            qid_data = answer_book[str(qid)]
+            if 'responses' not in qid_data:
+                print(f"  Warning: No responses found for query {qid}")
+                continue
+            
+            # Iterate through each context strategy  
+            for strategy_name in qid_data['responses'].keys():
                 print(f'  Strategy: {strategy_name}')
                 eval_result_strategy = {}
                 
                 # Iterate through each call's results
-                for call_idx in answer_book[str(qid)][strategy_name].keys():
-                    to_eval = answer_book[str(qid)][strategy_name][call_idx]['answer']
+                for call_idx in qid_data['responses'][strategy_name].keys():
+                    to_eval = qid_data['responses'][strategy_name][call_idx]
+                    
+                    # Skip error responses
+                    if isinstance(to_eval, str) and to_eval.startswith('Error:'):
+                        print(f"    Skipping error response for call {call_idx}")
+                        continue
+
+                    if isinstance(to_eval, dict) and 'answer' in to_eval:
+                        to_eval = to_eval['answer']
+                    else:
+                        to_eval = to_eval
                     
                     if eval_method == 'bertscore':
                         # BERTScore evaluation
@@ -383,6 +400,7 @@ if __name__ == "__main__":
                             r = eval_by_qrels(to_eval=to_eval, docno_dict=docno_dict, 
                                             qrel_levels=[1], local_model_path=local_model_path)
                         else:
+                            print(f"[DEBUG] qid={qid}, strategy={strategy_name}, call={call_idx}, type={type(to_eval)}, value={to_eval}")
                             r = eval_by_qrels(to_eval=to_eval, docno_dict=docno_dict, 
                                             local_model_path=local_model_path)
                     else:
